@@ -1,0 +1,229 @@
+# ============================================================
+# docker-compose.yml — ropa-store
+# Este archivo levanta toda la infraestructura del proyecto.
+# Comando para ejecutar: docker-compose up -d
+# Comando para detener:  docker-compose down
+# ============================================================
+
+# La versión del formato de docker-compose que estamos usando
+version: '3.9'
+
+# ── REDES ────────────────────────────────────────────────────
+# Una red privada para que todos los contenedores se hablen
+# entre ellos usando su container_name como dirección.
+# Sin esto, los contenedores no se pueden encontrar.
+networks:
+  ropa-store-network:
+    driver: bridge  # El tipo de red más común — funciona como un switch virtual
+
+# ── VOLÚMENES ────────────────────────────────────────────────
+# Aquí se guardan los datos de forma permanente en tu disco.
+# Si no existieran, cada vez que reinicias Docker perderías
+# todos los datos de las bases de datos.
+volumes:
+  postgres_data:    # Datos de PostgreSQL (pedidos, inventario)
+  mongo_data:       # Datos de MongoDB (usuarios, productos)
+  redis_data:       # Datos de Redis (caché)
+  grafana_data:     # Configuración de Grafana (dashboards)
+  prometheus_data:  # Métricas recolectadas por Prometheus
+
+# ── SERVICIOS ────────────────────────────────────────────────
+# Cada servicio es un contenedor. Docker los levanta todos
+# cuando ejecutas: docker-compose up -d
+services:
+
+  # ── ZOOKEEPER ──────────────────────────────────────────────
+  # Zookeeper es el administrador del clúster de Kafka.
+  # Kafka lo necesita para funcionar — guarda la configuración
+  # y coordina los nodos. Sin Zookeeper, Kafka no arranca.
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0  # Imagen oficial de Confluent
+    container_name: zookeeper               # Nombre con el que otros contenedores lo encuentran
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181           # Puerto por el que Kafka habla con Zookeeper
+      ZOOKEEPER_TICK_TIME: 2000             # Intervalo de heartbeat en milisegundos
+    networks:
+      - ropa-store-network                  # Lo conectamos a nuestra red privada
+
+  # ── KAFKA ──────────────────────────────────────────────────
+  # El bus de mensajes del proyecto. Los microservicios publican
+  # y consumen eventos a través de Kafka.
+  # Ejemplo: Order Service publica "pedido creado" y el
+  # Inventory Service lo escucha para reservar el stock.
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper                           # Kafka espera a que Zookeeper esté listo
+    ports:
+      - "9092:9092"                         # Puerto para que tus servicios Spring Boot se conecten
+    environment:
+      KAFKA_BROKER_ID: 1                                          # ID único de este broker de Kafka
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181                     # Dirección de Zookeeper (usa el container_name)
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      # PLAINTEXT://kafka:29092         → para comunicación entre contenedores (red interna)
+      # PLAINTEXT_HOST://localhost:9092 → para conexiones desde tu máquina (IntelliJ, Postman)
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT                 # Protocolo entre brokers
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1                   # Solo 1 réplica (suficiente para desarrollo)
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"                     # Crea topics automáticamente cuando un servicio los necesita
+    networks:
+      - ropa-store-network
+    healthcheck:                            # Verifica que Kafka está realmente listo
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s                         # Revisa cada 10 segundos
+      timeout: 10s                          # Espera máximo 10 segundos la respuesta
+      retries: 5                            # Intenta 5 veces antes de marcar como fallido
+
+  # ── KAFKA UI ───────────────────────────────────────────────
+  # Panel visual para ver los topics de Kafka desde el navegador.
+  # Muy útil para depurar — puedes ver los mensajes que se
+  # están publicando en tiempo real.
+  # Acceso: http://localhost:8090
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8090:8080"                         # Tu máquina:8090 → contenedor:8080
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ropa-store-kafka           # Nombre del clúster en la UI
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092    # Dirección interna de Kafka
+    networks:
+      - ropa-store-network
+
+  # ── POSTGRESQL ─────────────────────────────────────────────
+  # Base de datos relacional. La usamos para Orders e Inventory
+  # porque necesitan transacciones estrictas — si se crea un
+  # pedido y falla el pago, todo debe revertirse junto.
+  # Acceso desde DBeaver: localhost:5432
+  postgresql:
+    image: postgres:16-alpine               # Alpine = imagen más liviana
+    container_name: postgresql
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ropa_store_db            # Nombre de la base de datos que se crea automáticamente
+      POSTGRES_USER: ropa_user              # Usuario administrador
+      POSTGRES_PASSWORD: ropa_pass          # Contraseña (en producción usarías secrets, no texto plano)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data  # Guarda los datos en el volumen definido arriba
+    networks:
+      - ropa-store-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ropa_user -d ropa_store_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── MONGODB ────────────────────────────────────────────────
+  # Base de datos de documentos. La usamos para Users y Products
+  # porque sus datos son flexibles — un producto de ropa tiene
+  # talla y color, pero en el futuro podría tener más campos
+  # sin necesidad de alterar una tabla.
+  # Acceso desde DBeaver: localhost:27017
+  mongodb:
+    image: mongo:7.0
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo_user    # Usuario administrador de MongoDB
+      MONGO_INITDB_ROOT_PASSWORD: mongo_pass    # Contraseña
+      MONGO_INITDB_DATABASE: ropa_store_db      # Base de datos inicial que se crea
+    volumes:
+      - mongo_data:/data/db                     # Guarda los documentos en el volumen
+    networks:
+      - ropa-store-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── REDIS ──────────────────────────────────────────────────
+  # Base de datos en memoria. La usamos como caché para
+  # productos — en vez de ir a MongoDB cada vez que alguien
+  # busca un producto, Redis lo guarda en RAM y responde
+  # en microsegundos. También guarda sesiones de usuario.
+  # Acceso desde DBeaver: localhost:6379
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --requirepass redis_pass
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    # --requirepass     → contraseña para conectarse
+    # --maxmemory       → máximo 256MB de RAM para caché
+    # --maxmemory-policy allkeys-lru → cuando se llena, elimina los datos
+    #                                  menos usados recientemente (LRU)
+    volumes:
+      - redis_data:/data
+    networks:
+      - ropa-store-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis_pass", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── PROMETHEUS ─────────────────────────────────────────────
+  # Recolecta métricas de todos los microservicios cada 15
+  # segundos. Métricas como: cuántas peticiones por segundo,
+  # cuánto tarda en responder, cuánta memoria usa.
+  # Spring Boot expone estas métricas automáticamente en
+  # el endpoint /actuator/prometheus de cada servicio.
+  # Acceso: http://localhost:9090
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # :ro = read only — el contenedor puede leer pero no modificar el archivo
+      - prometheus_data:/prometheus
+    networks:
+      - ropa-store-network
+
+  # ── GRAFANA ────────────────────────────────────────────────
+  # Panel visual que toma las métricas de Prometheus y las
+  # muestra como gráficas. Puedes ver en tiempo real cuántos
+  # pedidos se están creando, si hay errores, etc.
+  # Acceso: http://localhost:3000
+  # Usuario: admin  Contraseña: admin123
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin         # Usuario para entrar al panel
+      GF_SECURITY_ADMIN_PASSWORD: admin123  # Contraseña del panel
+      GF_USERS_ALLOW_SIGN_UP: "false"       # Nadie más puede registrarse
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus                          # Grafana necesita Prometheus para tener datos
+    networks:
+      - ropa-store-network
+
+  # ── ZIPKIN ─────────────────────────────────────────────────
+  # Herramienta de distributed tracing — rastrea el camino
+  # completo de una petición a través de todos los servicios.
+  # Ejemplo: una petición de "crear pedido" pasa por Gateway →
+  # Order Service → Kafka → Inventory Service. Zipkin te
+  # muestra ese camino completo y cuánto tardó cada paso.
+  # Acceso: http://localhost:9411
+  zipkin:
+    image: openzipkin/zipkin:3.2
+    container_name: zipkin
+    ports:
+      - "9411:9411"
+    networks:
+      - ropa-store-network

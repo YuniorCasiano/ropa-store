@@ -1,0 +1,51 @@
+# ============================================================
+# prometheus.yml — configuración de Prometheus
+# Le dice a Prometheus a qué servicios vigilar y con qué
+# frecuencia recolectar sus métricas.
+# ============================================================
+
+global:
+  scrape_interval: 15s      # Cada 15 segundos va a buscar métricas a cada servicio
+  evaluation_interval: 15s  # Cada 15 segundos evalúa las reglas de alertas (si hubiera)
+
+# ── JOBS DE SCRAPING ─────────────────────────────────────────
+# Cada job es un servicio al que Prometheus vigila.
+# metrics_path es el endpoint de Spring Boot Actuator que
+# expone las métricas en formato que Prometheus entiende.
+scrape_configs:
+
+  # Vigila el API Gateway
+  - job_name: 'api-gateway'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['api-gateway:8080']   # container_name:puerto interno
+
+  # Vigila el User Service
+  - job_name: 'user-service'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['user-service:8081']
+
+  # Vigila el Auth Service
+  - job_name: 'auth-service'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['auth-service:8082']
+
+  # Vigila el Order Service
+  - job_name: 'order-service'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['order-service:8083']
+
+  # Vigila el Product Service
+  - job_name: 'product-service'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['product-service:8084']
+
+  # Vigila el Inventory Service
+  - job_name: 'inventory-service'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['inventory-service:8085']
