@@ -99,20 +99,21 @@ services:
   # pedido y falla el pago, todo debe revertirse junto.
   # Acceso desde DBeaver: localhost:5432
   postgresql:
-    image: postgres:16-alpine               # Alpine = imagen más liviana
+    image: postgres:16-alpine
     container_name: postgresql
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_DB: ropa_store_db            # Nombre de la base de datos que se crea automáticamente
-      POSTGRES_USER: ropa_user              # Usuario administrador
-      POSTGRES_PASSWORD: ropa_pass          # Contraseña (en producción usarías secrets, no texto plano)
+      POSTGRES_DB: ropa_store
+      POSTGRES_USER: ropa_user
+      POSTGRES_PASSWORD: ropa_pass
+      POSTGRES_HOST_AUTH_METHOD: md5
     volumes:
-      - postgres_data:/var/lib/postgresql/data  # Guarda los datos en el volumen definido arriba
+      - postgres_data:/var/lib/postgresql/data
     networks:
       - ropa-store-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ropa_user -d ropa_store_db"]
+      test: [ "CMD-SHELL", "pg_isready -U ropa_user -d ropa_store_db" ]
       interval: 5s
       timeout: 5s
       retries: 5
